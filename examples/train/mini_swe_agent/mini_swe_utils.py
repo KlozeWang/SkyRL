@@ -1,6 +1,8 @@
+import os
 from typing import TypedDict, Optional
 import traceback
 import uuid
+import inspect
 
 from typing import Dict, Any
 from loguru import logger
@@ -16,9 +18,46 @@ class MiniSWEEvaluationResult(TypedDict):
     eval_error: Optional[str]
 
 
+_NESTED_PODMAN_RUN_ARGS = [
+    "--privileged",
+    "--security-opt",
+    "label=disable",
+    "--userns=host",
+    "--pid=host",
+    "--ipc=host",
+    "--net=host",
+    "--cgroupns=host",
+]
+
+
+def _extend_unique_args(base_args: list[str], extra_args: list[str]) -> list[str]:
+    merged = list(base_args)
+    for arg in extra_args:
+        if arg not in merged:
+            merged.append(arg)
+    return merged
+
+
+def _apply_podman_compat(env_config: dict) -> None:
+    executable = os.path.basename(env_config.get("executable", "docker"))
+    if executable != "podman":
+        return
+
+    compat_mode = env_config.pop("podman_compat_mode", "")
+    extra_run_args = env_config.pop("podman_run_args", [])
+
+    run_args = list(env_config.get("run_args", ["--rm"]))
+    if compat_mode == "nested":
+        run_args = _extend_unique_args(run_args, _NESTED_PODMAN_RUN_ARGS)
+    if extra_run_args:
+        run_args = _extend_unique_args(run_args, list(extra_run_args))
+    env_config["run_args"] = run_args
+
+
 def get_sb_environment(config: dict, instance: dict, data_source: str) -> Environment:
     env_config = config.setdefault("environment", {})
     env_config["environment_class"] = env_config.get("environment_class", "docker")
+    _apply_podman_compat(env_config)
     image_name = get_docker_image_name(instance, data_source)
     if env_config["environment_class"] == "docker":
         env_config["image"] = image_name
@@ -27,10 +66,28 @@ def get_sb_environment(config: dict, instance: dict, data_source: str) -> Enviro
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):
         startup_command = Template(startup_command).render(**instance)
-        out = env.execute(startup_command)
+        out = execute_env_command(env, startup_command)
         if out["returncode"] != 0:
             raise RuntimeError(f"Error executing startup command: {out}")
     return env
+
+
+def execute_env_command(env: Environment, command: str, *, timeout: int | None = None) -> dict[str, Any]:
+    """Handle minisweagent environment.execute API differences across versions."""
+    execute_kwargs = {"timeout": timeout} if timeout is not None else {}
+    command_param = inspect.signature(env.execute).parameters.get("command")
+    if command_param is not None and command_param.annotation is dict:
+        return env.execute({"command": command}, **execute_kwargs)
+
+    try:
+        return env.execute(command, **execute_kwargs)
+    except AttributeError as e:
+        if "'str' object has no attribute 'get'" not in str(e):
+            raise
+    except TypeError as e:
+        if "get" not in str(e) and "mapping" not in str(e).lower():
+            raise
+    return env.execute({"command": command}, **execute_kwargs)
 
 
 def get_docker_image_name(instance: dict, data_source: str) -> str:
@@ -71,7 +128,7 @@ def evaluate_trajectory(
     delimiter = f"PATCH_{uuid.uuid4().hex}"  # unlikely to collide with symbols in the patch
     command = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
 
-    obs = env.execute(command)
+    obs = execute_env_command(env, command)
 
     if obs["returncode"] != 0:
         ret["eval_error"] = obs["output"]
@@ -80,7 +137,7 @@ def evaluate_trajectory(
         eval_script = instance["eval_script"]
         eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
         # add longer timeout for evaluation
-        obs = env.execute(eval_cmd, timeout=3600)
+        obs = execute_env_command(env, eval_cmd, timeout=3600)
         # use the return value
         ret["resolved"] = obs["returncode"] == 0
         # truncate to last 1000 characters for brevity

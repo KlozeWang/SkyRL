@@ -406,7 +406,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=request_logger,
             chat_template=chat_template,
             chat_template_content_format="auto",
+            **openai_kwargs,
         )
+        
+        # raise Exception(f"OpenAI Serving is not supported in AsyncVLLMInferenceEngine yet. {openai_kwargs}")
 
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,

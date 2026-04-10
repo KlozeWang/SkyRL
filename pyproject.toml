@@ -143,8 +143,8 @@ flashrl = [
 ]
 miniswe = [
     "skyrl[skyrl-train]",
-    # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
-    "mini-swe-agent>=1.12.0",
+    # NOTE (sumanthrh): This example currently relies on the v1 text-action API.
+    "mini-swe-agent==1.17.5",
     "litellm",
 ]
 harbor = [

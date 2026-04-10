@@ -224,6 +224,7 @@ environment:
     TQDM_DISABLE: '1'
   environment_class: docker
   executable: podman
+  podman_compat_mode: nested
 
 model:
   model_name: ""

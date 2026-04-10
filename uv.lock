@@ -4059,16 +4059,14 @@ wheels = [
 
 [[package]]
 name = "mini-swe-agent"
-version = "2.2.8"
+version = "1.17.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "datasets" },
     { name = "jinja2" },
     { name = "litellm" },
     { name = "openai" },
     { name = "platformdirs" },
     { name = "prompt-toolkit" },
-    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -4077,9 +4075,9 @@ dependencies = [
     { name = "textual" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b7/05/c13c2acbf5e2659badd9e2466e4a130b262e12116bf8839b26bdc3b3f017/mini_swe_agent-2.2.8.tar.gz", hash = "sha256:a516cd9be43f02475795d4408741f574abb1160e9028304f09df05014490c506", size = 59077, upload-time = "2026-03-24T16:52:46.806Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/bd/8a567cf749a76a403e9f25f22fb0fe786aa0cef925967b1eedb84a245803/mini_swe_agent-1.17.5.tar.gz", hash = "sha256:1dd6003f57f6d41975cd4a77993e25895b6fd64c55ce663132a220f15f1cdbec", size = 50503, upload-time = "2026-01-30T16:50:59.353Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/31/181d4412ec6ce0cbe57cdbbc8a2584299856ce685b30305f4079da89f3cb/mini_swe_agent-2.2.8-py3-none-any.whl", hash = "sha256:694df4de1337e665e3cd82e99f93374f573bf52b8e7c362ac5d8045ad9f7c37c", size = 102088, upload-time = "2026-03-24T16:52:45.803Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/31/dda3929bcd517637dd050cfb9c04a70aef7583c58f7ab15fd69faa0086d7/mini_swe_agent-1.17.5-py3-none-any.whl", hash = "sha256:6aff069f6c7fa250a1c2f7852ec13b3b51391368d15be4335b8c192e874b2f92", size = 81191, upload-time = "2026-01-30T16:50:58.401Z" },
 ]
 
 [[package]]
@@ -8578,7 +8576,7 @@ requires-dist = [
     { name = "loguru", marker = "extra == 'skyrl-train'" },
     { name = "megatron-bridge", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=420a7da37afea5eb4e8d3899d540c830b9c4cda2" },
     { name = "megatron-core", marker = "python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM?rev=4ef64ebc468cd3da41a22d46a2db37163694e8e2" },
-    { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
+    { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = "==1.17.5" },
     { name = "mkdocs", marker = "extra == 'dev'" },
     { name = "mkdocs-material", marker = "extra == 'dev'" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.24.0" },

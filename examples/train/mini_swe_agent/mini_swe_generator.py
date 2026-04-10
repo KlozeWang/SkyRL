@@ -8,9 +8,13 @@ from pathlib import Path
 
 from minisweagent.models import get_model
 from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
-from .mini_swe_utils import evaluate_trajectory, get_sb_environment
+from .mini_swe_utils import evaluate_trajectory, get_sb_environment, execute_env_command
+
+try:
+    from minisweagent.run.utils.save import save_traj as _legacy_save_traj
+except ModuleNotFoundError:
+    _legacy_save_traj = None
 
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
@@ -33,19 +37,81 @@ class MiniSWEGeneratorConfig(GeneratorConfig):
 
 
 class DefaultAgentWithReminder(DefaultAgent):
+    def _get_turns_remaining(self) -> int:
+        n_calls = getattr(self, "n_calls", getattr(self.model, "n_calls", 0))
+        return self.config.step_limit - n_calls
+
+    def _append_reminder(self, content: str) -> str:
+        remaining = self._get_turns_remaining()
+        if remaining == 1:
+            return f"{content}\nREMINDER: You only have 1 turn left. Please provide the final answer"
+        if remaining > 1:
+            return f"{content}\nREMINDER: You have {remaining} turns left to arrive at the solution."
+        return content
+
     def get_observation(self, response: dict) -> dict:
         """Execute the action and return the output."""
         output = self.execute_action(self.parse_action(response))
         observation = self.render_template(self.config.action_observation_template, output=output)
-        remaining = self.config.step_limit - self.model.n_calls
-
-        if remaining == 1:
-            observation = f"{observation}\nREMINDER: You only have 1 turn left. Please provide the final answer"
-        elif remaining > 1:
-            observation = f"{observation}\nREMINDER: You have {remaining} turns left to arrive at the solution."
-
+        observation = self._append_reminder(observation)
         self.add_message("user", observation)
         return output
+
+    def execute_action(self, action: dict) -> dict:
+        output = execute_env_command(self.env, action["action"])
+        self.has_finished(output)
+        return output | {"action": action["action"]}
+
+    def execute_actions(self, message: dict) -> list[dict]:
+        """Append the reminder to v2 observation messages after execution."""
+        observations = super().execute_actions(message)
+        if observations and observations[-1].get("role") == "user":
+            observations[-1]["content"] = self._append_reminder(observations[-1]["content"])
+        return observations
+
+
+def save_traj_compat(
+    agent: Optional[DefaultAgent],
+    path: Path,
+    *,
+    exit_status: Optional[str] = None,
+    result: Optional[dict | str] = None,
+    extra_info: Optional[dict] = None,
+    reward: int = 0,
+    eval_error: Optional[str] = None,
+) -> None:
+    if _legacy_save_traj is not None:
+        _legacy_save_traj(
+            agent,
+            path,
+            exit_status=exit_status,
+            result=result,
+            extra_info=extra_info,
+            reward=reward,
+            eval_error=eval_error,
+        )
+        return
+
+    extra_dict = {
+        "info": extra_info or {},
+        "reward": reward,
+        "eval_error": eval_error,
+    }
+    if result is not None:
+        extra_dict["result"] = result
+    if exit_status is not None:
+        extra_dict["info"]["exit_status"] = exit_status
+    if isinstance(result, str):
+        extra_dict["info"]["submission"] = result
+    elif isinstance(result, dict):
+        extra_dict["info"]["result"] = result
+
+    if agent is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        return
+
+    agent.save(path, extra_dict)
 
 
 @ray.remote(num_cpus=0.01)
@@ -71,13 +137,20 @@ def init_and_run(
     agent = None
     env = None
     extra_info = None
+    exit_status = "UnknownError"
     result = None
     reward = 0
     error = None
     try:
         env = get_sb_environment(sweagent_config, instance, data_source)
         agent = DefaultAgentWithReminder(model, env, **sweagent_config.get("agent", {}))
-        exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        run_result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        # logger.info(f"Finished running agent for instance {instance['instance_id']} with result: {run_result}")
+        if isinstance(run_result, tuple):
+            exit_status, result = run_result
+        else:
+            exit_status = run_result.get("exit_status", "")
+            result = run_result.get("submission", "")
     except Exception as e:
         logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
@@ -106,7 +179,15 @@ def init_and_run(
                 eval_error = str(e)
                 error = str(e)
 
-            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
+            save_traj_compat(
+                agent,
+                path,
+                exit_status=exit_status,
+                result=result,
+                extra_info=extra_info,
+                reward=reward,
+                eval_error=eval_error,
+            )
 
     return (agent.messages if agent is not None else [], reward, error)
 
@@ -167,7 +248,12 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             return None, None, None, None, None, None
 
         # TODO (sumanthrh): This is currently hardcoded for SWEBench with 2 initial messages (system and user).
-        response_messages = messages[2:]
+        response_messages = [message for message in messages[2:] if message["role"] in ("user", "assistant")]
+        
+        # from loguru import logger
+        # logger.info("================================")
+        # for message in response_messages:
+        #     logger.info(f"Response message: {message}")
 
         for message in messages[:2]:
             assert message["role"] in (
@@ -182,7 +268,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory
         last_idx = len(response_messages) - 1
-        while response_messages[last_idx]["role"] == "user":
+        while last_idx >= 0 and response_messages[last_idx]["role"] == "user":
             last_idx -= 1
         if last_idx < 0:
             raise ValueError(
@@ -250,12 +336,36 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         all_outputs = await asyncio.gather(*tasks)
 
-        # Filter out the `None` entries, which means that trajectory generation failed
-        responses = [output[0] for output in all_outputs if output[0] is not None]
-        rewards = [output[1] for output in all_outputs if output[0] is not None]
-        stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
-        loss_masks = [output[3] for output in all_outputs if output[0] is not None]
-        prompt_token_ids = [output[4] for output in all_outputs if output[0] is not None]
+        from loguru import logger
+
+        responses = []
+        rewards = []
+        stop_reasons = []
+        loss_masks = []
+        prompt_token_ids = []
+
+        for i, output in enumerate(all_outputs):
+            response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = output
+            if response_ids is None:
+                instance_id = env_extras[i]["instance"].get("instance_id", "unknown")
+                logger.warning(
+                    f"Trajectory generation failed for instance {instance_id}; "
+                    "using an empty placeholder response to preserve batch alignment."
+                )
+                response_ids = []
+                reward = 0.0
+                stop_reason = "error"
+                loss_mask = []
+                prompt_ids = self.tokenizer.apply_chat_template(
+                    prompts[i], add_generation_prompt=False, return_dict=False, tokenize=True
+                )
+
+            responses.append(response_ids)
+            rewards.append(reward)
+            stop_reasons.append(stop_reason)
+            loss_masks.append(loss_mask)
+            prompt_token_ids.append(prompt_ids)
+
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."

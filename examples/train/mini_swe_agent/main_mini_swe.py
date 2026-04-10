@@ -1,6 +1,7 @@
 import sys
 
 import ray
+from loguru import logger
 from skyrl.train.config import SkyRLGymConfig, make_config
 from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl.train.utils import initialize_ray
@@ -32,6 +33,7 @@ def skyrl_entrypoint(cfg):
 
 def main() -> None:
     cfg = MiniSWEConfig.from_cli_overrides(sys.argv[1:])
+    logger.info(f"mini-swe engine_init_kwargs: {cfg.generator.inference_engine.engine_init_kwargs}")
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
