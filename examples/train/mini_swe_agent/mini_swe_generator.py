@@ -1,13 +1,14 @@
 import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any, Tuple
+import subprocess
 import yaml
 import traceback
 import ray
 from pathlib import Path
 
 from minisweagent.models import get_model
-from minisweagent.agents.default import DefaultAgent
+from minisweagent.agents.default import DefaultAgent, ExecutionTimeoutError
 from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment, execute_env_command
 
@@ -58,7 +59,15 @@ class DefaultAgentWithReminder(DefaultAgent):
         return output
 
     def execute_action(self, action: dict) -> dict:
-        output = execute_env_command(self.env, action["action"])
+        try:
+            output = execute_env_command(self.env, action["action"])
+        except (TimeoutError, subprocess.TimeoutExpired) as e:
+            output = getattr(e, "output", "") or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            raise ExecutionTimeoutError(
+                self.render_template(self.config.timeout_template, action=action, output=output)
+            )
         self.has_finished(output)
         return output | {"action": action["action"]}
 
