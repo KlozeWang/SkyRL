@@ -265,7 +265,11 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"],
+        result["rewards"],
+        trajectory_metrics=result.get("trajectory_metrics"),
+    )
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -308,6 +312,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    trajectory_metrics: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -357,6 +362,18 @@ def get_rollout_metrics(
             agg = aggregate_for_environment(env_name, metrics)
             for key, value in agg.items():
                 rollout_metrics[f"environment/{key}"] = value
+
+    if trajectory_metrics is not None:
+        metric_values = defaultdict(list)
+        for metrics in trajectory_metrics:
+            for key, value in metrics.items():
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    metric_values[key].append(float(value))
+        for key, values in metric_values.items():
+            value_arr = np.array(values, dtype=np.float64)
+            rollout_metrics[f"trajectory/{key}/mean"] = np.mean(value_arr).item()
+            rollout_metrics[f"trajectory/{key}/sum"] = np.sum(value_arr).item()
+            rollout_metrics[f"trajectory/{key}/max"] = np.max(value_arr).item()
 
     return rollout_metrics
 

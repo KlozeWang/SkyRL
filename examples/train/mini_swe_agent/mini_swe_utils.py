@@ -90,6 +90,21 @@ def execute_env_command(env: Environment, command: str, *, timeout: int | None =
     return env.execute({"command": command}, **execute_kwargs)
 
 
+def close_environment(env: Environment | None) -> None:
+    """Best-effort cleanup across Mini-SWE-Agent environment versions."""
+    if env is None:
+        return
+    for method_name in ("close", "cleanup"):
+        method = getattr(env, method_name, None)
+        if method is None:
+            continue
+        try:
+            method()
+        except Exception as e:
+            logger.debug(f"Error closing Mini-SWE environment with {method_name}: {e}")
+        return
+
+
 def get_docker_image_name(instance: dict, data_source: str) -> str:
     """Get the image name for a SWEBench/SWE-Gym instance."""
     image_name = instance.get("image_name", None)
@@ -121,27 +136,29 @@ def evaluate_trajectory(
         logger.info(f"Starting environment failed with exception: {e}\n, {traceback.format_exc()}")
         return ret
 
-    # apply git patch
-    # NOTE (sumanthrh): This applies patch in-line, and the maximum patch size is limited by the OS limits for `ARG_MAX`.
-    # In modern systems, this is typically ~ 1 MB, which is pretty generous.
-    # For simplicity, we assume that large patches greater than `ARG_MAX` are meant to fail
-    delimiter = f"PATCH_{uuid.uuid4().hex}"  # unlikely to collide with symbols in the patch
-    command = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
+    try:
+        # apply git patch
+        # NOTE (sumanthrh): This applies patch in-line, and the maximum patch size is limited by the OS limits for `ARG_MAX`.
+        # In modern systems, this is typically ~ 1 MB, which is pretty generous.
+        # For simplicity, we assume that large patches greater than `ARG_MAX` are meant to fail
+        delimiter = f"PATCH_{uuid.uuid4().hex}"  # unlikely to collide with symbols in the patch
+        command = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
 
-    obs = execute_env_command(env, command)
+        obs = execute_env_command(env, command)
 
-    if obs["returncode"] != 0:
-        ret["eval_error"] = obs["output"]
-    else:
-        # run eval script in-line
-        eval_script = instance["eval_script"]
-        eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
-        # add longer timeout for evaluation
-        obs = execute_env_command(env, eval_cmd, timeout=3600)
-        # use the return value
-        ret["resolved"] = obs["returncode"] == 0
-        # truncate to last 1000 characters for brevity
-        ret["eval_error"] = (
-            f"(truncated to last 1000 characters)\n{obs["output"][-1000:]}" if not ret["resolved"] else None
-        )
+        if obs["returncode"] != 0:
+            ret["eval_error"] = obs["output"]
+        else:
+            # run eval script in-line
+            eval_script = instance["eval_script"]
+            eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
+            # add longer timeout for evaluation
+            obs = execute_env_command(env, eval_cmd, timeout=3600)
+            # use the return value
+            ret["resolved"] = obs["returncode"] == 0
+            # truncate to last 1000 characters for brevity
+            if not ret["resolved"]:
+                ret["eval_error"] = f"(truncated to last 1000 characters)\n{obs['output'][-1000:]}"
+    finally:
+        close_environment(env)
     return ret

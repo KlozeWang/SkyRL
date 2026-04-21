@@ -35,6 +35,13 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide exactly ONE bash command to execute
 
+    You may ask a teacher model for advice by issuing this exact command form:
+    ```bash
+    askteacher --prompt "your question" --think_level low
+    ```
+    The allowed think levels are low, medium, and high. Teacher output is returned as the next observation.
+    Teacher output tokens are penalized in the reward, so ask only when the expected help is worth the cost.
+
     ## Important Boundaries
     - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
     - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
@@ -78,6 +85,7 @@ agent:
     - Your response SHOULD include a THOUGHT section explaining your reasoning
     - Your response MUST include EXACTLY ONE bash code block
     - This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)
+    - A teacher request counts as one command and must be exactly: askteacher --prompt "..." --think_level low|medium|high
     - If you include zero or multiple bash blocks, or no command at all, YOUR RESPONSE WILL FAIL
     - Do NOT try to run multiple independent commands in separate blocks in one response
     - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.

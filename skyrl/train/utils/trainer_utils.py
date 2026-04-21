@@ -423,6 +423,23 @@ def handle_replace_sampling(
             if generator_output["rollout_logprobs"]:
                 generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
 
+            for key, value in generator_output.items():
+                if key in {
+                    "prompt_token_ids",
+                    "response_ids",
+                    "rewards",
+                    "loss_masks",
+                    "stop_reasons",
+                    "rollout_metrics",
+                    "rollout_logprobs",
+                }:
+                    continue
+                if isinstance(value, list) and len(value) == len(rewards_list):
+                    replacement_value = value[replacement_idx]
+                    value[bad_idx] = (
+                        replacement_value.copy() if hasattr(replacement_value, "copy") else replacement_value
+                    )
+
         # Update UIDs accordingly
         replaced_uids = uids.copy()
         for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
@@ -565,6 +582,10 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     if output.get("stop_reasons"):
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
 
+    for key, value in output.items():
+        if key not in filtered and isinstance(value, list) and len(value) == len(output["response_ids"]):
+            filtered[key] = [value[i] for i in kept_indices]
+
     return filtered
 
 
@@ -623,6 +644,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "loss_masks",
             "rewards",
             "rollout_logprobs",
+            "trajectory_metrics",
         ]:
             assert len(generator_output[key]) == len(generator_output["response_ids"]), (
                 f"Generator output {key} length must be equal to response_ids length, "
