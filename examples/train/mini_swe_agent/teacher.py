@@ -18,7 +18,7 @@ class MiniSWETeacherConfig:
     api_key: Optional[str] = None
     api_key_env: str = "TEACHER_API_KEY"
     model: str = "gpt-5.2"
-    max_turns: int = 8
+    max_turns: int = 20
     timeout_s: int = 600
     tool_env_mode: str = "shared"
     include_learner_history: bool = True
@@ -159,12 +159,14 @@ class TeacherClient:
         instance: Dict[str, Any],
         learner_messages: List[Dict[str, Any]],
         execute_command: Callable[[str, Optional[int]], Dict[str, Any]],
+        event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> TeacherSessionResult:
         messages = self._initial_messages(request, instance, learner_messages)
         transcript: List[Dict[str, Any]] = []
         usage = TeacherUsage()
 
-        for _ in range(self.cfg.max_turns):
+        for turn_idx in range(1, self.cfg.max_turns + 1):
+            _emit_teacher_event(event_callback, "turn_start", {"turn": turn_idx})
             response = self._create_completion(messages, request.think_level)
             usage.calls += 1
             usage.output_tokens += _completion_tokens(response)
@@ -173,24 +175,45 @@ class TeacherClient:
             assistant_message = _message_to_dict(message)
             messages.append(assistant_message)
             transcript.append(copy.deepcopy(assistant_message))
+            _emit_teacher_event(
+                event_callback,
+                "assistant_message",
+                {
+                    "turn": turn_idx,
+                    "message": copy.deepcopy(assistant_message),
+                    "usage": usage.to_dict(),
+                },
+            )
 
             tool_calls = getattr(message, "tool_calls", None) or []
             if not tool_calls:
-                return TeacherSessionResult(
+                result = TeacherSessionResult(
                     answer=(getattr(message, "content", None) or "").strip(),
                     usage=usage,
                     transcript=transcript,
                 )
+                _emit_teacher_event(
+                    event_callback,
+                    "handoff",
+                    {"turn": turn_idx, "answer": result.answer, "error": result.error, "usage": usage.to_dict()},
+                )
+                return result
 
             for tool_call in tool_calls:
                 name = tool_call.function.name
                 args = _json_args(tool_call.function.arguments)
                 if name == "handoff_to_learner":
-                    return TeacherSessionResult(
+                    result = TeacherSessionResult(
                         answer=str(args.get("answer", "")).strip(),
                         usage=usage,
                         transcript=transcript,
                     )
+                    _emit_teacher_event(
+                        event_callback,
+                        "handoff",
+                        {"turn": turn_idx, "answer": result.answer, "error": result.error, "usage": usage.to_dict()},
+                    )
+                    return result
                 if name != "run_bash":
                     tool_result = {"error": f"Unknown teacher tool: {name}"}
                 else:
@@ -201,20 +224,38 @@ class TeacherClient:
                     else:
                         tool_result = execute_command(command, self.cfg.tool_timeout_s)
 
+                truncated_tool_result = _truncate_tool_result(tool_result)
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": json.dumps(_truncate_tool_result(tool_result), ensure_ascii=False),
+                    "content": json.dumps(truncated_tool_result, ensure_ascii=False),
                 }
                 messages.append(tool_message)
                 transcript.append(copy.deepcopy(tool_message))
+                _emit_teacher_event(
+                    event_callback,
+                    "tool_result",
+                    {
+                        "turn": turn_idx,
+                        "tool_call_id": tool_call.id,
+                        "name": name,
+                        "result": copy.deepcopy(truncated_tool_result),
+                        "usage": usage.to_dict(),
+                    },
+                )
 
-        return TeacherSessionResult(
+        result = TeacherSessionResult(
             answer=_teacher_limit_status(transcript),
             usage=usage,
             transcript=transcript,
             error="teacher_turns_limit_reached",
         )
+        _emit_teacher_event(
+            event_callback,
+            "limit",
+            {"turn": self.cfg.max_turns, "answer": result.answer, "error": result.error, "usage": usage.to_dict()},
+        )
+        return result
 
     def _create_completion(self, messages: List[Dict[str, Any]], think_level: str):
         kwargs: Dict[str, Any] = {
@@ -359,6 +400,16 @@ def _teacher_limit_status(transcript: List[Dict[str, Any]]) -> str:
         "Latest tool output is included so the learner can continue from the teacher's partial work.\n\n"
         f"{latest_tool_output}"
     )
+
+
+def _emit_teacher_event(
+    event_callback: Optional[Callable[[str, Dict[str, Any]], None]],
+    event: str,
+    payload: Dict[str, Any],
+) -> None:
+    if event_callback is None:
+        return
+    event_callback(event, payload)
 
 
 def _message_to_dict(message: Any) -> Dict[str, Any]:

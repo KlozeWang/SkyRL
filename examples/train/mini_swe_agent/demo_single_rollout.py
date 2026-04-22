@@ -306,10 +306,33 @@ class DebugAgentWithTurnLogging(DefaultAgentWithReminder):
         output = super()._execute_teacher_request(teacher_request)
         if self.print_turns:
             if len(self.teacher_records) > record_idx:
-                self._print_teacher_record(self.teacher_records[-1])
+                self._print_teacher_finish(self.teacher_records[-1])
             else:
                 self._print_teacher_no_record(output)
         return output
+
+    def handle_teacher_event(self, event: str, payload: Dict[str, Any]) -> None:
+        if not self.print_turns:
+            return
+        if event == "turn_start":
+            print_debug_header(
+                f"TEACHER TURN {payload.get('turn')}: START",
+                color=Ansi.TEACHER,
+                enabled=self.color,
+            )
+            return
+        if event == "assistant_message":
+            self._print_teacher_assistant_message(int(payload.get("turn", 0)), payload.get("message", {}))
+            return
+        if event == "tool_result":
+            self._print_teacher_tool_result(int(payload.get("turn", 0)), payload)
+            return
+        if event in ("handoff", "limit"):
+            self._print_teacher_handoff(event, payload)
+            return
+
+        print_debug_header(f"TEACHER EVENT: {event}", color=Ansi.TEACHER, enabled=self.color)
+        print_debug_body(payload, color=Ansi.TEACHER, enabled=self.color)
 
     def _print_initial_prompt(self, role: str, content: Any) -> None:
         print_debug_header(f"STUDENT INITIAL {role.upper()} PROMPT", color=Ansi.STUDENT, enabled=self.color)
@@ -411,9 +434,9 @@ class DebugAgentWithTurnLogging(DefaultAgentWithReminder):
             enabled=self.color,
         )
 
-    def _print_teacher_record(self, record: Dict[str, Any]) -> None:
+    def _print_teacher_finish(self, record: Dict[str, Any]) -> None:
         usage = record.get("usage", {})
-        print_debug_header("TEACHER ROLLOUT TRANSCRIPT", color=Ansi.TEACHER, enabled=self.color)
+        print_debug_header("TEACHER ROLLOUT END", color=Ansi.TEACHER, enabled=self.color)
         print_debug_body(
             json.dumps(
                 {
@@ -426,25 +449,6 @@ class DebugAgentWithTurnLogging(DefaultAgentWithReminder):
             color=Ansi.TEACHER,
             enabled=self.color,
         )
-
-        teacher_turn = 0
-        for message in record.get("transcript", []):
-            role = str(message.get("role", ""))
-            if role == "assistant":
-                teacher_turn += 1
-                self._print_teacher_assistant_message(teacher_turn, message)
-            elif role == "tool":
-                self._print_teacher_tool_message(teacher_turn, message)
-            else:
-                print_debug_header(
-                    f"TEACHER MESSAGE: {role.upper()}",
-                    color=Ansi.TEACHER,
-                    enabled=self.color,
-                )
-                print_debug_body(message, color=Ansi.TEACHER, enabled=self.color)
-
-        print_debug_header("TEACHER HANDOFF TO STUDENT", color=Ansi.TEACHER, enabled=self.color)
-        print_debug_body(record.get("answer", ""), color=Ansi.TEACHER, enabled=self.color)
 
     def _print_teacher_assistant_message(self, teacher_turn: int, message: Dict[str, Any]) -> None:
         print_debug_header(
@@ -485,6 +489,40 @@ class DebugAgentWithTurnLogging(DefaultAgentWithReminder):
             return
 
         print_debug_body(parsed, color=Ansi.TEACHER, enabled=self.color)
+
+    def _print_teacher_tool_result(self, teacher_turn: int, payload: Dict[str, Any]) -> None:
+        name = payload.get("name", "")
+        print_debug_header(
+            f"TEACHER TURN {teacher_turn}: TOOL RESULT {name}",
+            color=Ansi.TEACHER,
+            enabled=self.color,
+        )
+        result = payload.get("result", {})
+        if isinstance(result, dict):
+            returncode = result.get("returncode", result.get("error", ""))
+            output = result.get("output", result)
+            print_debug_body(f"returncode={returncode}", color=Ansi.TEACHER, enabled=self.color)
+            print_debug_body(output, color=Ansi.TEACHER, enabled=self.color)
+            return
+        print_debug_body(result, color=Ansi.TEACHER, enabled=self.color)
+
+    def _print_teacher_handoff(self, event: str, payload: Dict[str, Any]) -> None:
+        title = "TEACHER HANDOFF TO STUDENT" if event == "handoff" else "TEACHER TURN LIMIT REACHED"
+        print_debug_header(title, color=Ansi.TEACHER, enabled=self.color)
+        print_debug_body(
+            json.dumps(
+                {
+                    "turn": payload.get("turn"),
+                    "error": payload.get("error"),
+                    "usage": payload.get("usage"),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            color=Ansi.TEACHER,
+            enabled=self.color,
+        )
+        print_debug_body(payload.get("answer", ""), color=Ansi.TEACHER, enabled=self.color)
 
     def _print_teacher_no_record(self, output: Dict[str, Any]) -> None:
         print_debug_header("TEACHER ROLLOUT FAILED BEFORE RECORD", color=Ansi.TEACHER, enabled=self.color)

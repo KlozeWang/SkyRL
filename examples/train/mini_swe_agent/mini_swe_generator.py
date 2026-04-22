@@ -121,11 +121,13 @@ class DefaultAgentWithReminder(DefaultAgent):
 
         self.teacher_usage.requests += 1
         try:
+            event_callback = getattr(self, "handle_teacher_event", None)
             result = self._get_teacher_client().run(
                 teacher_request,
                 instance=self.instance,
                 learner_messages=self.messages,
                 execute_command=self._execute_teacher_tool_command,
+                event_callback=event_callback if callable(event_callback) else None,
             )
         except Exception as e:
             result = TeacherSessionResult(
