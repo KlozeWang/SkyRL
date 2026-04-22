@@ -1,0 +1,1 @@
+{"project_name": "xujia-job", "storage_account_name": "conversationhub", "container_name": "unilm", "blob_storage_account_name": "conversationhub", "registry_name": "projects", "local_path": "/home/shaohanh/xujiawang/SkyRL", "default_output_dir": "/home/shaohanh/xujiawang/SkyRL/amlt", "project_uuid": "7233461670.88952-16c73217-2b63", "version": "11.0.0"}
