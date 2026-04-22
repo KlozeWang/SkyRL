@@ -37,7 +37,7 @@ agent:
 
     You may ask a teacher model for advice by issuing this exact command form:
     ```bash
-    askteacher --prompt "your question" --think_level low
+    askteacher --prompt "your question or subtask" --think_level low
     ```
     The allowed think levels are low, medium, and high. Teacher output is returned as the next observation.
     Teacher output tokens are penalized in the reward, so ask only when the expected help is worth the cost.
@@ -52,11 +52,12 @@ agent:
     3. Edit the source code to resolve the issue
     4. Verify your fix works by running your script again
     5. Test edge cases to ensure your fix is robust
+    6. Ask the teacher for help if you get stuck or want advice on next steps
 
     ## Command Execution Rules
     You are operating in an environment where
     1. You write a single command
-    2. The system executes that command in a subshell
+    2. The system executes that command in a subshell (including askteacher)
     3. You see the result
     4. You write your next command
 
@@ -113,6 +114,12 @@ agent:
     ```bash
     cat file.txt
     ```
+
+    I found the file is too difficult to understand, so I'll ask the teacher for help:
+
+    ```bash
+    askteacher --prompt "Can you explain the structure of this file and how it relates to the issue described in the PR?" --think_level medium
+    ```
     </example_response>
 
     If you need to run multiple commands, either:
@@ -125,6 +132,7 @@ agent:
 
     ## Environment Details
     - You have a full Linux shell environment
+    - You can also ask a teacher model for advice or task completion, but remember that this is costly in terms of reward, so use it wisely
     - Always use non-interactive flags (-y, -f) for commands
     - Avoid interactive tools like vi, nano, or any that require user input
     - If a command isn't available, you can install it
@@ -159,6 +167,11 @@ agent:
     ```bash
     # View specific lines with numbers
     nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ### Ask teacher for help:
+    ```bash
+    askteacher --prompt "Your question or subtask here" --think_level low|medium|high
     ```
 
     ### Any other command you want to run

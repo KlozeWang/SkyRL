@@ -1,0 +1,182 @@
+agent:
+  system_template: |
+    You are the teacher agent for Mini-SWE training. A learner model calls you when it needs help on a SWE programming task.
+    Your job is to solve the learner's problem in the repository, not merely describe possible approaches.
+
+    You interact with the codebase by submitting exactly ONE bash code block with ONE command per turn.
+    Use as many tool turns as needed within the teacher turn limit to inspect, edit, and test the codebase.
+    If your environment is shared with the learner, you may directly modify files in /testbed and those edits become part of the learner's working tree.
+
+    Include a THOUGHT section before your command where you explain the concrete next step.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <learner_problem>
+    {{task}}
+    </learner_problem>
+
+    <instructions>
+    # Teacher Task Instructions
+
+    ## Objective
+    You are helping a student solve the programming problem above.
+    Focus on completing the student's task in the repository.
+    Prefer making and verifying the needed code changes yourself over giving high-level advice.
+
+    If the student's request is a narrow subproblem, solve that subproblem first.
+    If the full underlying SWE task is clear and feasible, continue through the full fix.
+    Keep working until either:
+    1. The problem is solved and verified
+    2. You reach the teacher turn limit and must hand back the best current progress
+
+    ## Repository Boundaries
+    - Working directory: /testbed
+    - You may inspect, edit, and test regular source files in /testbed
+    - Do not modify tests or packaging/configuration files unless the learner problem explicitly requires it
+    - Use non-interactive commands only
+
+    ## Expected Workflow
+    1. Inspect the problem and relevant source files
+    2. Reproduce or understand the failure mode
+    3. Edit source files directly when a fix is clear
+    4. Run focused verification commands
+    5. Iterate until the fix is complete or the teacher turn limit is reached
+
+    ## Command Execution Rules
+    You are operating in an environment where:
+    1. You write a single command
+    2. The system executes that command in a subshell
+    3. You see the result
+    4. You write your next command
+
+    Each response must include:
+    1. A THOUGHT section explaining the immediate reason for the command
+    2. Exactly one bash code block containing exactly one command
+
+    Commands must be specified in a single bash code block:
+
+    ```bash
+    your_command_here
+    ```
+
+    **Critical Requirements**
+    - Your response MUST include exactly one bash code block
+    - The bash block MUST contain exactly one command, or commands connected with && or ||
+    - Do not use multiple independent bash blocks in one response
+    - Directory or environment variable changes are not persistent across turns
+    - Prefix commands with `cd /testbed && ...` when needed
+    - Avoid interactive tools like vi, nano, pagers, or commands that require user input
+    - Always use non-interactive flags when installing or running tools
+
+    ## Useful Command Examples
+
+    ### Inspect files
+    ```bash
+    find . -maxdepth 3 -type f | sort | sed -n '1,120p'
+    ```
+
+    ### View specific lines
+    ```bash
+    nl -ba path/to/file.py | sed -n '10,80p'
+    ```
+
+    ### Edit files with Python
+    ```bash
+    python - <<'PY'
+    from pathlib import Path
+    path = Path("path/to/file.py")
+    text = path.read_text()
+    path.write_text(text.replace("old", "new"))
+    PY
+    ```
+
+    ### Verify the diff
+    ```bash
+    git diff -- path/to/file.py
+    ```
+
+    ### Run focused tests or checks
+    ```bash
+    pytest path/to/test_file.py -q
+    ```
+
+    ## Handoff
+    When you have solved the problem, or when the teacher turn limit leaves no useful next command, issue exactly:
+
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+    ```
+
+    This submits the teacher's completed work or best current patch.
+    You cannot continue working after submitting.
+    </instructions>
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  step_limit: 20
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 180
+  pull_timeout: 1200
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: docker
+  executable: podman
+  podman_compat_mode: nested
+
+model:
+  model_name: ""
+  model_kwargs:
+    drop_params: true

@@ -20,7 +20,7 @@ class MiniSWETeacherConfig:
     model: str = "gpt-5.2"
     max_turns: int = 8
     timeout_s: int = 600
-    tool_env_mode: str = "shadow"
+    tool_env_mode: str = "shared"
     include_learner_history: bool = True
     return_teacher_transcript_to_learner: bool = False
     output_token_penalty_coef: float = 0.0
@@ -93,12 +93,30 @@ def calculate_teacher_penalty(output_tokens: int, cfg: MiniSWETeacherConfig) -> 
 
 def build_teacher_observation(result: TeacherSessionResult, *, return_transcript: bool = False) -> str:
     if result.error:
-        return (
-            "<teacher_error>\n"
-            f"{result.error}\n"
-            "</teacher_error>\n"
-            f"<teacher_output_tokens>{result.usage.output_tokens}</teacher_output_tokens>"
-        )
+        parts = [
+            "<teacher_error>",
+            result.error,
+            "</teacher_error>",
+        ]
+        if result.answer.strip():
+            parts.extend(
+                [
+                    f'<teacher_partial_answer output_tokens="{result.usage.output_tokens}" tool_calls="{result.usage.tool_calls}">',
+                    result.answer.strip(),
+                    "</teacher_partial_answer>",
+                ]
+            )
+        else:
+            parts.append(f"<teacher_output_tokens>{result.usage.output_tokens}</teacher_output_tokens>")
+        if return_transcript:
+            parts.extend(
+                [
+                    "<teacher_transcript>",
+                    json.dumps(result.transcript, ensure_ascii=False),
+                    "</teacher_transcript>",
+                ]
+            )
+        return "\n".join(parts)
 
     parts = [
         f'<teacher_answer output_tokens="{result.usage.output_tokens}" tool_calls="{result.usage.tool_calls}">',
@@ -192,10 +210,10 @@ class TeacherClient:
                 transcript.append(copy.deepcopy(tool_message))
 
         return TeacherSessionResult(
-            answer="Teacher did not hand control back before max_turns.",
+            answer=_teacher_limit_status(transcript),
             usage=usage,
             transcript=transcript,
-            error="teacher_max_turns_exceeded",
+            error="teacher_turns_limit_reached",
         )
 
     def _create_completion(self, messages: List[Dict[str, Any]], think_level: str):
@@ -218,14 +236,21 @@ class TeacherClient:
         instance: Dict[str, Any],
         learner_messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        system = (
-            "You are a teacher model helping a learner solve a programming task. "
-            "You may inspect the repository with the run_bash tool. "
-            "When you are ready to return control to the learner, call handoff_to_learner with concise advice. "
-            "Do not claim that you changed the learner environment; your shell access may be isolated."
+        system = "\n".join(
+            [
+                "You are a teacher model helping a learner solve a programming task.",
+                "Focus on solving the learner's problem, not on giving generic advice.",
+                "Use the run_bash tool for as many turns as needed to inspect, edit, and test the codebase.",
+                "Continue working until either the issue is solved or the teacher_turns_limit is reached.",
+                "When the problem is solved, call handoff_to_learner with a concise summary of what changed and what was verified.",
+                "If you cannot finish before the turn limit, call handoff_to_learner with the current findings, files touched, and the next concrete step.",
+                self._tool_environment_instruction(),
+            ]
         )
         parts = [
             f"<instance_id>{instance.get('instance_id', '')}</instance_id>",
+            f"<teacher_turns_limit>{self.cfg.max_turns}</teacher_turns_limit>",
+            f"<teacher_tool_env_mode>{self.cfg.tool_env_mode}</teacher_tool_env_mode>",
             "<problem_statement>",
             str(instance.get("problem_statement", "")),
             "</problem_statement>",
@@ -246,13 +271,34 @@ class TeacherClient:
             {"role": "user", "content": "\n".join(parts)},
         ]
 
+    def _tool_environment_instruction(self) -> str:
+        if self.cfg.tool_env_mode == "shared":
+            return (
+                "Your run_bash tool executes in the learner's live /testbed checkout. "
+                "You may directly modify source files there; those edits are visible to the learner after handoff."
+            )
+        if self.cfg.tool_env_mode == "shadow":
+            return (
+                "Your run_bash tool executes in an isolated copy of /testbed. "
+                "You may edit and test in that copy, but handoff must clearly tell the learner what patch or commands to apply."
+            )
+        if self.cfg.tool_env_mode == "readonly":
+            return (
+                "Your run_bash tool executes in a separate inspection environment. "
+                "Do not rely on edits persisting for the learner; handoff must give exact guidance for the learner to apply."
+            )
+        return (
+            f"Your run_bash tool environment mode is {self.cfg.tool_env_mode!r}. "
+            "If commands fail because of the environment mode, hand off exact guidance for the learner."
+        )
+
 
 TEACHER_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run one non-interactive bash command in the teacher shell environment.",
+            "description": "Run one non-interactive bash command in the teacher shell environment. Use it to inspect, edit, and test the codebase.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -270,13 +316,13 @@ TEACHER_TOOLS = [
         "type": "function",
         "function": {
             "name": "handoff_to_learner",
-            "description": "Return control to the learner with the teacher's answer.",
+            "description": "Return control to the learner after solving the problem or reaching the teacher turn limit.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "answer": {
                         "type": "string",
-                        "description": "Concise guidance to show to the learner.",
+                        "description": "Concise summary of the solution, verification, remaining issue, or next concrete step to show to the learner.",
                     }
                 },
                 "required": ["answer"],
@@ -285,6 +331,34 @@ TEACHER_TOOLS = [
         },
     },
 ]
+
+
+def _teacher_limit_status(transcript: List[Dict[str, Any]]) -> str:
+    latest_tool_output = ""
+    for message in reversed(transcript):
+        if message.get("role") != "tool":
+            continue
+        try:
+            parsed = json.loads(str(message.get("content", "")))
+        except json.JSONDecodeError:
+            latest_tool_output = str(message.get("content", ""))
+        else:
+            latest_tool_output = str(parsed.get("output", parsed))
+        break
+
+    if not latest_tool_output:
+        return (
+            "Teacher reached teacher_turns_limit before calling handoff_to_learner. "
+            "No final solution summary was produced."
+        )
+
+    if len(latest_tool_output) > 3000:
+        latest_tool_output = latest_tool_output[:1500] + "\n...[truncated]...\n" + latest_tool_output[-1500:]
+    return (
+        "Teacher reached teacher_turns_limit before calling handoff_to_learner. "
+        "Latest tool output is included so the learner can continue from the teacher's partial work.\n\n"
+        f"{latest_tool_output}"
+    )
 
 
 def _message_to_dict(message: Any) -> Dict[str, Any]:
