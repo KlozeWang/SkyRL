@@ -35,6 +35,7 @@ from examples.train.mini_swe_agent.teacher import (  # noqa: E402
     MiniSWETeacherConfig,
     TeacherClient,
     calculate_teacher_penalty,
+    parse_askteacher_command,
 )
 
 
@@ -72,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         "--force-teacher-first",
         action="store_true",
         help="Debug-only: prepend an instruction asking the learner to call askteacher on its first turn.",
+    )
+    parser.add_argument(
+        "--no-print-turns",
+        action="store_true",
+        help="Do not print assistant turns, parsed commands, askteacher requests, and observations.",
     )
     parser.add_argument(
         "--teacher-smoke-test",
@@ -234,6 +240,98 @@ def run_teacher_smoke_test(
     )
 
 
+class DebugAgentWithTurnLogging(DefaultAgentWithReminder):
+    def __init__(self, *args, print_turns: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.print_turns = print_turns
+        self._debug_turn_idx = 0
+
+    def get_observation(self, response: dict) -> dict:
+        if self.print_turns:
+            self._print_assistant_turn(response)
+        output = super().get_observation(response)
+        if self.print_turns:
+            self._print_observation(output)
+        return output
+
+    def add_message(self, role: str, content: str, **kwargs):
+        if self.print_turns and role in ("system", "user") and self._debug_turn_idx == 0:
+            self._print_initial_prompt(role, content)
+
+        parent = super()
+        if hasattr(parent, "add_message"):
+            return parent.add_message(role, content, **kwargs)
+        return parent.add_messages({"role": role, "content": content, **kwargs})
+
+    def add_messages(self, *messages: dict) -> list[dict]:
+        if self.print_turns:
+            for message in messages:
+                self._print_added_message(message)
+        return super().add_messages(*messages)
+
+    def _print_initial_prompt(self, role: str, content: Any) -> None:
+        print(f"\n===== INITIAL {role.upper()} PROMPT =====", flush=True)
+        print(str(content), flush=True)
+
+    def _print_added_message(self, message: dict) -> None:
+        role = str(message.get("role", ""))
+        content = message.get("content", "")
+        if role in ("system", "user") and self._debug_turn_idx == 0:
+            self._print_initial_prompt(role, content)
+            return
+
+        if role == "assistant":
+            self._debug_turn_idx += 1
+            print(f"\n===== TURN {self._debug_turn_idx}: ASSISTANT =====", flush=True)
+            print(str(content), flush=True)
+            for action in message.get("extra", {}).get("actions", []):
+                self._print_action(str(action))
+            return
+
+        if role == "user" and self._debug_turn_idx > 0:
+            print(f"\n===== TURN {self._debug_turn_idx}: OBSERVATION =====", flush=True)
+            print(str(content), flush=True)
+            return
+
+        if role == "exit":
+            print("\n===== EXIT =====", flush=True)
+            print(str(content), flush=True)
+
+    def _print_assistant_turn(self, response: dict) -> None:
+        self._debug_turn_idx += 1
+        content = str(response.get("content", ""))
+        action = ""
+        try:
+            action = self.parse_action(response).get("action", "")
+        except Exception as exc:
+            action = f"<parse_error: {type(exc).__name__}: {exc}>"
+
+        print(f"\n===== TURN {self._debug_turn_idx}: ASSISTANT =====", flush=True)
+        print(content, flush=True)
+        if action:
+            self._print_action(action)
+
+    def _print_action(self, action: str) -> None:
+        print(f"\n----- parsed action -----\n{action}", flush=True)
+        try:
+            teacher_request = parse_askteacher_command(action)
+        except ValueError as exc:
+            print(f"\n----- askteacher parse error -----\n{exc}", flush=True)
+        else:
+            if teacher_request is not None:
+                print(
+                    "\n----- askteacher request -----\n"
+                    f"think_level={teacher_request.think_level}\n"
+                    f"prompt={teacher_request.prompt}",
+                    flush=True,
+                )
+
+    def _print_observation(self, output: dict) -> None:
+        print(f"\n===== TURN {self._debug_turn_idx}: OBSERVATION =====", flush=True)
+        print(f"returncode={output.get('returncode')}", flush=True)
+        print(str(output.get("output", "")), flush=True)
+
+
 def get_problem_statement(instance: Dict[str, Any], force_teacher_first: bool) -> str:
     problem_statement = str(instance["problem_statement"])
     if not force_teacher_first:
@@ -302,9 +400,10 @@ def main() -> None:
         )
 
         env = get_sb_environment(copy.deepcopy(sweagent_config), instance, data_source)
-        agent = DefaultAgentWithReminder(
+        agent = DebugAgentWithTurnLogging(
             model,
             env,
+            print_turns=not args.no_print_turns,
             teacher_cfg=teacher_cfg,
             instance=instance,
             sweagent_config=sweagent_config,
