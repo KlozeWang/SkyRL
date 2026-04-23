@@ -45,6 +45,7 @@ class MiniSWEGeneratorConfig(GeneratorConfig):
 
     miniswe_config_path: str = ""
     miniswe_traj_dir: str = ""
+    rollout_num_cpus: float = 4.0
     teacher: MiniSWETeacherConfig = field(default_factory=MiniSWETeacherConfig)
 
 
@@ -325,6 +326,9 @@ def init_and_run(
                 "teacher_output_tokens": agent.teacher_usage.output_tokens,
                 "teacher_tool_calls": agent.teacher_usage.tool_calls,
                 "teacher_penalty": teacher_penalty,
+                "teacher_enabled": teacher_cfg.enabled,
+                "teacher_tool_env_mode": teacher_cfg.tool_env_mode,
+                "teacher_max_turns": teacher_cfg.max_turns,
                 "correctness_reward": correctness_reward,
                 "penalized_reward": reward,
             }
@@ -334,6 +338,16 @@ def init_and_run(
                     "correctness_reward": correctness_reward,
                     "penalized_reward": reward,
                     "teacher": teacher_usage,
+                    "teacher_config": {
+                        "enabled": teacher_cfg.enabled,
+                        "model": teacher_cfg.model,
+                        "base_url": teacher_cfg.base_url,
+                        "tool_env_mode": teacher_cfg.tool_env_mode,
+                        "max_turns": teacher_cfg.max_turns,
+                        "output_token_penalty_coef": teacher_cfg.output_token_penalty_coef,
+                        "output_token_penalty_unit": teacher_cfg.output_token_penalty_unit,
+                        "max_penalty": teacher_cfg.max_penalty,
+                    },
                     "teacher_records": agent.teacher_records,
                 }
             )
@@ -393,7 +407,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
-        messages, reward, error, trajectory_metrics = await init_and_run.remote(
+        messages, reward, error, trajectory_metrics = await init_and_run.options(
+            num_cpus=self.generator_cfg.rollout_num_cpus
+        ).remote(
             env_extras["instance"],
             self.litellm_model_name,
             sweagent_config,

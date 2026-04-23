@@ -10,9 +10,15 @@ set -x
 #   generator.teacher.enabled=true \
 #   generator.teacher.base_url=http://4.155.72.80:10189 \
 #   generator.teacher.model=gpt-5.2 \
+#   generator.teacher.tool_env_mode=shared \
+#   generator.teacher.max_turns=20 \
 #   generator.teacher.output_token_penalty_coef=0.05
 
 export MSWEA_COST_TRACKING="ignore_errors"
+export LITELLM_MODEL_REGISTRY_PATH="${LITELLM_MODEL_REGISTRY_PATH:-examples/train/mini_swe_agent/litellm.json}"
+# Nested Podman in Singularity needs --pid=host to avoid denied /proc mounts.
+# Set MINISWE_PODMAN_USE_HOST_PID=0 only if your runtime supports private PID namespaces.
+export MINISWE_PODMAN_USE_HOST_PID="${MINISWE_PODMAN_USE_HOST_PID:-1}"
 DATA_DIR="/mnt/xujiawang/skyrl/examples/swe/swe_gym_subset"
 OUTPUT_ROOT="/mnt/xujiawang/skyrl/examples/swe"
 CKPT_PATH="$OUTPUT_ROOT/ckpts/llm_mini_swe_8B"
@@ -25,6 +31,7 @@ NNODES=1
 NUM_INFERENCE_ENGINES=4
 TP_SIZE=2
 LOGGER=wandb
+MINISWE_ROLLOUT_NUM_CPUS="${MINISWE_ROLLOUT_NUM_CPUS:-2}"
 
 mkdir -p "$CKPT_PATH" "$MINISWE_TRAJ_DIR"
 
@@ -48,7 +55,7 @@ uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_sw
   trainer.epochs=20 \
   trainer.eval_batch_size=25 \
   trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=10000 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=16 \
   trainer.policy_mini_batch_size=16 \
@@ -60,6 +67,7 @@ uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_sw
   generator.sampling_params.max_generate_length=4096 \
   generator.max_input_length=30720 \
   generator.max_turns=20 \
+  generator.rollout_num_cpus=$MINISWE_ROLLOUT_NUM_CPUS \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.inference_engine.backend=vllm \

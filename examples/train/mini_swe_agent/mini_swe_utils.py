@@ -1,4 +1,8 @@
 import os
+import shlex
+import signal
+import subprocess
+import time
 from typing import TypedDict, Optional
 import traceback
 import uuid
@@ -23,7 +27,6 @@ _NESTED_PODMAN_RUN_ARGS = [
     "--security-opt",
     "label=disable",
     "--userns=host",
-    "--pid=host",
     "--ipc=host",
     "--net=host",
     "--cgroupns=host",
@@ -49,6 +52,11 @@ def _apply_podman_compat(env_config: dict) -> None:
     run_args = list(env_config.get("run_args", ["--rm"]))
     if compat_mode == "nested":
         run_args = _extend_unique_args(run_args, _NESTED_PODMAN_RUN_ARGS)
+        # Azure/Singularity nested Podman cannot mount a private /proc reliably,
+        # so host PID namespace is the default. Cleanup kills inspected payload
+        # PIDs directly when Podman/crun cannot reap them.
+        if _env_flag("MINISWE_PODMAN_USE_HOST_PID", default=True):
+            run_args = _extend_unique_args(run_args, ["--pid=host"])
     if extra_run_args:
         run_args = _extend_unique_args(run_args, list(extra_run_args))
     env_config["run_args"] = run_args
@@ -63,7 +71,10 @@ def get_sb_environment(config: dict, instance: dict, data_source: str) -> Enviro
         env_config["image"] = image_name
     elif env_config["environment_class"] == "singularity":
         env_config["image"] = f"docker://{image_name}"
-    env = get_environment(env_config)
+    try:
+        env = get_environment(env_config)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(_format_subprocess_error(e)) from e
     if startup_command := config.get("run", {}).get("env_startup_command"):
         startup_command = Template(startup_command).render(**instance)
         out = execute_env_command(env, startup_command)
@@ -94,6 +105,8 @@ def close_environment(env: Environment | None) -> None:
     """Best-effort cleanup across Mini-SWE-Agent environment versions."""
     if env is None:
         return
+    if _remove_container_synchronously(env):
+        return
     for method_name in ("close", "cleanup"):
         method = getattr(env, method_name, None)
         if method is None:
@@ -103,6 +116,144 @@ def close_environment(env: Environment | None) -> None:
         except Exception as e:
             logger.debug(f"Error closing Mini-SWE environment with {method_name}: {e}")
         return
+
+
+def _remove_container_synchronously(env: Environment) -> bool:
+    container_id = getattr(env, "container_id", None)
+    config = getattr(env, "config", None)
+    executable = getattr(config, "executable", None)
+    if not container_id or not executable:
+        return False
+
+    cmd = [str(executable), "rm", "-f", str(container_id)]
+    if _run_container_cleanup_command(cmd, timeout=90):
+        _clear_container_id(env)
+        return True
+
+    logger.warning(f"Falling back to direct payload kill for Mini-SWE container {container_id}")
+    _kill_container_payload(str(executable), str(container_id))
+    if _run_container_cleanup_command(cmd, timeout=30):
+        _clear_container_id(env)
+        return True
+
+    logger.warning(
+        f"Unable to remove Mini-SWE container {container_id} after direct payload kill. "
+        "Skipping Mini-SWE's async cleanup fallback to avoid accumulating stuck podman rm processes."
+    )
+    return True
+
+
+def _run_container_cleanup_command(cmd: list[str], *, timeout: int) -> bool:
+    try:
+        result = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        output = e.output.decode("utf-8", errors="replace") if isinstance(e.output, bytes) else (e.output or "")
+        logger.warning(f"Timed out running {shlex.join(cmd)}. Output:\n{output}")
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            f"Failed to run {shlex.join(cmd)}. returncode={result.returncode} output:\n{result.stdout}"
+        )
+        return False
+
+    return True
+
+
+def _kill_container_payload(executable: str, container_id: str) -> None:
+    _run_quiet([executable, "kill", "--signal", "KILL", container_id], timeout=15)
+
+    pid = _container_pid(executable, container_id)
+    if pid <= 0:
+        return
+
+    logger.warning(f"Killing Mini-SWE container payload pid={pid} for container {container_id}")
+    _kill_process_group(pid)
+    _kill_process(pid)
+    time.sleep(1)
+
+
+def _container_pid(executable: str, container_id: str) -> int:
+    result = _run_quiet(
+        [executable, "inspect", "--format", "{{.State.Pid}}", container_id],
+        timeout=10,
+    )
+    if result is None or result.returncode != 0:
+        return 0
+    try:
+        return int((result.stdout or "").strip())
+    except ValueError:
+        return 0
+
+
+def _kill_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as e:
+        logger.warning(f"Permission denied killing process group {pid}: {e}")
+    except Exception as e:
+        logger.warning(f"Error killing process group {pid}: {type(e).__name__}: {e}")
+
+
+def _kill_process(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as e:
+        logger.warning(f"Permission denied killing process {pid}: {e}")
+    except Exception as e:
+        logger.warning(f"Error killing process {pid}: {type(e).__name__}: {e}")
+
+
+def _run_quiet(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        output = e.output.decode("utf-8", errors="replace") if isinstance(e.output, bytes) else (e.output or "")
+        logger.warning(f"Timed out running {shlex.join(cmd)}. Output:\n{output}")
+        return None
+
+
+def _clear_container_id(env: Environment) -> None:
+    try:
+        setattr(env, "container_id", None)
+    except Exception:
+        pass
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _format_subprocess_error(e: subprocess.CalledProcessError) -> str:
+    stdout = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+    stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+    command = shlex.join(map(str, e.cmd)) if isinstance(e.cmd, (list, tuple)) else str(e.cmd)
+    return (
+        f"Command failed with returncode={e.returncode}: {command}\n"
+        f"<stdout>\n{stdout}\n</stdout>\n"
+        f"<stderr>\n{stderr}\n</stderr>"
+    )
 
 
 def get_docker_image_name(instance: dict, data_source: str) -> str:
