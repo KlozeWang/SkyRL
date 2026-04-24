@@ -681,6 +681,9 @@ def main() -> None:
         "teacher_records": agent.teacher_records if agent is not None else [],
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(correctness_reward)
+    print(teacher_penalty)
+    print(reward)
 
     if agent is not None and agent.teacher_usage.requests == 0:
         print(
